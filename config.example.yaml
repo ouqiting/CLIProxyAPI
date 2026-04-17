@@ -77,7 +77,12 @@ force-model-prefix: false
 # Default is false (disabled).
 passthrough-headers: false
 
-# Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
+# Maximum upstream connect/first-byte timeout in seconds. Set to 0 to disable.
+upstream-timeout: 15
+
+# Number of retries.
+# In fill-first mode, this is the per-credential retry count for a single request.
+# In round-robin mode, this keeps the legacy whole-request retry behavior.
 request-retry: 3
 
 # Maximum number of different credentials to try for one failed request.

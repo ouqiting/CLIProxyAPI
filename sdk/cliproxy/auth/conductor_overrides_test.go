@@ -335,6 +335,176 @@ func TestManager_MaxRetryCredentials_LimitsCrossCredentialRetries(t *testing.T) 
 	}
 }
 
+func TestManager_FillFirst_RequestRetryOverride_IsTrackedPerCredential(t *testing.T) {
+	m := NewManager(nil, &FillFirstSelector{}, nil)
+	m.SetRetryConfig(0, 0, 0)
+
+	executor := &authFallbackExecutor{
+		id: "claude",
+		executeErrors: map[string]error{
+			"aa-auth": &Error{HTTPStatus: http.StatusInternalServerError, Message: "aa failed"},
+			"bb-auth": &Error{HTTPStatus: http.StatusInternalServerError, Message: "bb failed"},
+		},
+	}
+	m.RegisterExecutor(executor)
+
+	authA := &Auth{
+		ID:       "aa-auth",
+		Provider: "claude",
+		Metadata: map[string]any{"disable_cooling": true},
+	}
+	authB := &Auth{
+		ID:       "bb-auth",
+		Provider: "claude",
+		Metadata: map[string]any{
+			"disable_cooling": true,
+			"request_retry":   float64(1),
+		},
+	}
+
+	reg := registry.GetGlobalRegistry()
+	model := "test-fill-first-retry-override"
+	reg.RegisterClient(authA.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	reg.RegisterClient(authB.ID, "claude", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(authA.ID)
+		reg.UnregisterClient(authB.ID)
+	})
+
+	if _, errRegister := m.Register(context.Background(), authA); errRegister != nil {
+		t.Fatalf("register authA: %v", errRegister)
+	}
+	if _, errRegister := m.Register(context.Background(), authB); errRegister != nil {
+		t.Fatalf("register authB: %v", errRegister)
+	}
+
+	_, errExecute := m.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+	if errExecute == nil {
+		t.Fatal("expected execute error")
+	}
+
+	calls := executor.ExecuteCalls()
+	expected := []string{"aa-auth", "bb-auth", "bb-auth"}
+	if len(calls) != len(expected) {
+		t.Fatalf("execute calls = %v, want %v", calls, expected)
+	}
+	for i := range expected {
+		if calls[i] != expected[i] {
+			t.Fatalf("execute calls = %v, want %v", calls, expected)
+		}
+	}
+}
+
+func TestManager_FillFirst_Codex500ExhaustsCredentialImmediately(t *testing.T) {
+	t.Run("execute", func(t *testing.T) {
+		m := NewManager(nil, &FillFirstSelector{}, nil)
+		m.SetRetryConfig(3, 0, 0)
+
+		executor := &authFallbackExecutor{
+			id: "codex",
+			executeErrors: map[string]error{
+				"aa-auth": &Error{HTTPStatus: http.StatusInternalServerError, Message: "aa failed"},
+				"bb-auth": &Error{HTTPStatus: http.StatusInternalServerError, Message: "bb failed"},
+			},
+		}
+		m.RegisterExecutor(executor)
+
+		authA := &Auth{ID: "aa-auth", Provider: "codex", Metadata: map[string]any{"disable_cooling": true}}
+		authB := &Auth{ID: "bb-auth", Provider: "codex", Metadata: map[string]any{"disable_cooling": true}}
+
+		reg := registry.GetGlobalRegistry()
+		model := "test-fill-first-codex-500"
+		reg.RegisterClient(authA.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		reg.RegisterClient(authB.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			reg.UnregisterClient(authA.ID)
+			reg.UnregisterClient(authB.ID)
+		})
+
+		if _, errRegister := m.Register(context.Background(), authA); errRegister != nil {
+			t.Fatalf("register authA: %v", errRegister)
+		}
+		if _, errRegister := m.Register(context.Background(), authB); errRegister != nil {
+			t.Fatalf("register authB: %v", errRegister)
+		}
+
+		_, errExecute := m.Execute(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute == nil {
+			t.Fatal("expected execute error")
+		}
+
+		calls := executor.ExecuteCalls()
+		expected := []string{"aa-auth", "bb-auth"}
+		if len(calls) != len(expected) {
+			t.Fatalf("execute calls = %v, want %v", calls, expected)
+		}
+		for i := range expected {
+			if calls[i] != expected[i] {
+				t.Fatalf("execute calls = %v, want %v", calls, expected)
+			}
+		}
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		m := NewManager(nil, &FillFirstSelector{}, nil)
+		m.SetRetryConfig(3, 0, 0)
+
+		executor := &authFallbackExecutor{
+			id: "codex",
+			streamFirstErrors: map[string]error{
+				"aa-auth": &Error{HTTPStatus: http.StatusInternalServerError, Message: "aa failed"},
+				"bb-auth": &Error{HTTPStatus: http.StatusInternalServerError, Message: "bb failed"},
+			},
+		}
+		m.RegisterExecutor(executor)
+
+		authA := &Auth{ID: "aa-auth", Provider: "codex", Metadata: map[string]any{"disable_cooling": true}}
+		authB := &Auth{ID: "bb-auth", Provider: "codex", Metadata: map[string]any{"disable_cooling": true}}
+
+		reg := registry.GetGlobalRegistry()
+		model := "test-fill-first-codex-500-stream"
+		reg.RegisterClient(authA.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		reg.RegisterClient(authB.ID, "codex", []*registry.ModelInfo{{ID: model}})
+		t.Cleanup(func() {
+			reg.UnregisterClient(authA.ID)
+			reg.UnregisterClient(authB.ID)
+		})
+
+		if _, errRegister := m.Register(context.Background(), authA); errRegister != nil {
+			t.Fatalf("register authA: %v", errRegister)
+		}
+		if _, errRegister := m.Register(context.Background(), authB); errRegister != nil {
+			t.Fatalf("register authB: %v", errRegister)
+		}
+
+		streamResult, errExecute := m.ExecuteStream(context.Background(), []string{"codex"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{})
+		if errExecute != nil {
+			t.Fatalf("execute stream error = %v, want wrapped stream result", errExecute)
+		}
+		if streamResult == nil {
+			t.Fatal("expected stream result")
+		}
+		chunk, ok := <-streamResult.Chunks
+		if !ok {
+			t.Fatal("expected stream error chunk")
+		}
+		if chunk.Err == nil {
+			t.Fatal("expected stream chunk error")
+		}
+
+		calls := executor.StreamCalls()
+		expected := []string{"aa-auth", "bb-auth"}
+		if len(calls) != len(expected) {
+			t.Fatalf("stream calls = %v, want %v", calls, expected)
+		}
+		for i := range expected {
+			if calls[i] != expected[i] {
+				t.Fatalf("stream calls = %v, want %v", calls, expected)
+			}
+		}
+	})
+}
+
 func TestManager_ModelSupportBadRequest_FallsBackAndSuspendsAuth(t *testing.T) {
 	m := NewManager(nil, nil, nil)
 	executor := &authFallbackExecutor{

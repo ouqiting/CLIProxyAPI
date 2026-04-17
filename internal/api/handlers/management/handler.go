@@ -3,6 +3,7 @@
 package management
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -48,6 +50,8 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	managementHTMLSync  func(context.Context, string, string, string, managementasset.UpdateOptions) managementasset.UpdateResult
+	restartScheduler    func() error
 }
 
 // NewHandler creates a new management handler instance.
@@ -132,6 +136,20 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+func (h *Handler) syncManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string, opts managementasset.UpdateOptions) managementasset.UpdateResult {
+	if h != nil && h.managementHTMLSync != nil {
+		return h.managementHTMLSync(ctx, staticDir, proxyURL, panelRepository, opts)
+	}
+	return managementasset.SyncLatestManagementHTML(ctx, staticDir, proxyURL, panelRepository, opts)
+}
+
+func (h *Handler) scheduleRestart() error {
+	if h != nil && h.restartScheduler != nil {
+		return h.restartScheduler()
+	}
+	return scheduleSystemRestart()
 }
 
 // Middleware enforces access control for management endpoints.

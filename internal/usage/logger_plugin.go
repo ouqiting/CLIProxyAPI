@@ -89,12 +89,21 @@ type modelStats struct {
 
 // RequestDetail stores the timestamp, latency, and token usage for a single request.
 type RequestDetail struct {
-	Timestamp time.Time  `json:"timestamp"`
-	LatencyMs int64      `json:"latency_ms"`
-	Source    string     `json:"source"`
-	AuthIndex string     `json:"auth_index"`
-	Tokens    TokenStats `json:"tokens"`
-	Failed    bool       `json:"failed"`
+	Timestamp            time.Time  `json:"timestamp"`
+	LatencyMs            int64      `json:"latency_ms"`
+	Source               string     `json:"source"`
+	AuthIndex            string     `json:"auth_index"`
+	Tokens               TokenStats `json:"tokens"`
+	Failed               bool       `json:"failed"`
+	RequestID            string     `json:"request_id,omitempty"`
+	Method               string     `json:"method,omitempty"`
+	Path                 string     `json:"path,omitempty"`
+	StatusCode           int        `json:"status_code,omitempty"`
+	UpstreamStatusCode   int        `json:"upstream_status_code,omitempty"`
+	ErrorStage           string     `json:"error_stage,omitempty"`
+	ErrorCode            string     `json:"error_code,omitempty"`
+	ErrorMessage         string     `json:"error_message,omitempty"`
+	UpstreamErrorMessage string     `json:"upstream_error_message,omitempty"`
 }
 
 // TokenStats captures the token usage breakdown for a request.
@@ -174,6 +183,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		failed = !resolveSuccess(ctx)
 	}
 	success := !failed
+	requestMeta := mergeRequestMetadata(
+		normaliseRequestMetadata(record.Request),
+		normaliseRequestMetadata(SnapshotRequestMetadata(ctx, failed, nil)),
+	)
 	modelName := record.Model
 	if modelName == "" {
 		modelName = "unknown"
@@ -198,12 +211,21 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 		s.apis[statsKey] = stats
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
-		Timestamp: timestamp,
-		LatencyMs: normaliseLatency(record.Latency),
-		Source:    record.Source,
-		AuthIndex: record.AuthIndex,
-		Tokens:    detail,
-		Failed:    failed,
+		Timestamp:            timestamp,
+		LatencyMs:            normaliseLatency(record.Latency),
+		Source:               record.Source,
+		AuthIndex:            record.AuthIndex,
+		Tokens:               detail,
+		Failed:               failed,
+		RequestID:            requestMeta.RequestID,
+		Method:               requestMeta.Method,
+		Path:                 requestMeta.Path,
+		StatusCode:           requestMeta.StatusCode,
+		UpstreamStatusCode:   requestMeta.UpstreamStatusCode,
+		ErrorStage:           requestMeta.ErrorStage,
+		ErrorCode:            requestMeta.ErrorCode,
+		ErrorMessage:         requestMeta.ErrorMessage,
+		UpstreamErrorMessage: requestMeta.UpstreamErrorMessage,
 	})
 
 	s.requestsByDay[dayKey]++
@@ -384,13 +406,14 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%t|%s|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
+		detail.RequestID,
 		tokens.InputTokens,
 		tokens.OutputTokens,
 		tokens.ReasoningTokens,
@@ -473,6 +496,37 @@ func normaliseLatency(latency time.Duration) int64 {
 		return 0
 	}
 	return latency.Milliseconds()
+}
+
+func mergeRequestMetadata(primary, fallback coreusage.RequestMetadata) coreusage.RequestMetadata {
+	if primary.RequestID == "" {
+		primary.RequestID = fallback.RequestID
+	}
+	if primary.Method == "" {
+		primary.Method = fallback.Method
+	}
+	if primary.Path == "" {
+		primary.Path = fallback.Path
+	}
+	if primary.StatusCode == 0 {
+		primary.StatusCode = fallback.StatusCode
+	}
+	if primary.UpstreamStatusCode == 0 {
+		primary.UpstreamStatusCode = fallback.UpstreamStatusCode
+	}
+	if primary.ErrorStage == "" {
+		primary.ErrorStage = fallback.ErrorStage
+	}
+	if primary.ErrorCode == "" {
+		primary.ErrorCode = fallback.ErrorCode
+	}
+	if primary.ErrorMessage == "" {
+		primary.ErrorMessage = fallback.ErrorMessage
+	}
+	if primary.UpstreamErrorMessage == "" {
+		primary.UpstreamErrorMessage = fallback.UpstreamErrorMessage
+	}
+	return primary
 }
 
 func formatHour(hour int) string {

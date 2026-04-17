@@ -20,6 +20,7 @@ type Record struct {
 	Latency     time.Duration
 	Failed      bool
 	Detail      Detail
+	Request     RequestMetadata
 }
 
 // Detail holds the token usage breakdown.
@@ -29,6 +30,20 @@ type Detail struct {
 	ReasoningTokens int64
 	CachedTokens    int64
 	TotalTokens     int64
+}
+
+// RequestMetadata carries lightweight request/error fields that can be
+// surfaced in aggregated usage views without embedding full upstream logs.
+type RequestMetadata struct {
+	RequestID            string
+	Method               string
+	Path                 string
+	StatusCode           int
+	UpstreamStatusCode   int
+	ErrorStage           string
+	ErrorCode            string
+	ErrorMessage         string
+	UpstreamErrorMessage string
 }
 
 // Plugin consumes usage records emitted by the proxy runtime.

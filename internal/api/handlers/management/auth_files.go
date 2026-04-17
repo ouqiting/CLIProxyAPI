@@ -62,6 +62,7 @@ var (
 	callbackForwarders    = make(map[int]*callbackForwarder)
 	errAuthFileMustBeJSON = errors.New("auth file must be .json")
 	errAuthFileNotFound   = errors.New("auth file not found")
+	errAuthFileExists     = errors.New("auth file already exists")
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -806,6 +807,246 @@ func (h *Handler) writeAuthFile(ctx context.Context, name string, data []byte) e
 	}
 	if err := h.upsertAuthRecord(ctx, auth); err != nil {
 		return err
+	}
+	return nil
+}
+
+// PatchAuthFile updates auth file content and/or renames the auth file.
+func (h *Handler) PatchAuthFile(c *gin.Context) {
+	if h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	var req struct {
+		OldName string           `json:"oldName"`
+		NewName *string          `json:"newName"`
+		Content *string          `json:"content"`
+		JSONRaw *json.RawMessage `json:"json"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
+		return
+	}
+
+	oldName := strings.TrimSpace(req.OldName)
+	if isUnsafeAuthFileName(oldName) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid oldName"})
+		return
+	}
+	if !strings.HasSuffix(strings.ToLower(oldName), ".json") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "oldName must end with .json"})
+		return
+	}
+
+	targetName := oldName
+	renameRequested := false
+	if req.NewName != nil {
+		trimmed := strings.TrimSpace(*req.NewName)
+		if trimmed == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "newName cannot be empty"})
+			return
+		}
+		if isUnsafeAuthFileName(trimmed) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid newName"})
+			return
+		}
+		if !strings.HasSuffix(strings.ToLower(trimmed), ".json") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "newName must end with .json"})
+			return
+		}
+		targetName = trimmed
+		renameRequested = !strings.EqualFold(targetName, oldName)
+	}
+
+	if req.Content != nil && req.JSONRaw != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "content and json cannot both be provided"})
+		return
+	}
+
+	contentProvided := req.Content != nil || req.JSONRaw != nil
+	if !renameRequested && !contentProvided {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "nothing to update"})
+		return
+	}
+
+	oldPath := filepath.Join(h.cfg.AuthDir, filepath.Base(oldName))
+	targetPath := filepath.Join(h.cfg.AuthDir, filepath.Base(targetName))
+	if !filepath.IsAbs(oldPath) {
+		if abs, errAbs := filepath.Abs(oldPath); errAbs == nil {
+			oldPath = abs
+		}
+	}
+	if !filepath.IsAbs(targetPath) {
+		if abs, errAbs := filepath.Abs(targetPath); errAbs == nil {
+			targetPath = abs
+		}
+	}
+
+	oldData, errRead := os.ReadFile(oldPath)
+	if errRead != nil {
+		if os.IsNotExist(errRead) {
+			c.JSON(http.StatusNotFound, gin.H{"error": errAuthFileNotFound.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to read file: %v", errRead)})
+		return
+	}
+
+	if renameRequested {
+		if _, errStat := os.Stat(targetPath); errStat == nil {
+			c.JSON(http.StatusConflict, gin.H{"error": errAuthFileExists.Error()})
+			return
+		} else if !os.IsNotExist(errStat) {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to check target file: %v", errStat)})
+			return
+		}
+	}
+
+	dataToWrite := oldData
+	if req.Content != nil {
+		dataToWrite = []byte(*req.Content)
+	}
+	if req.JSONRaw != nil {
+		var obj map[string]any
+		if err := json.Unmarshal(*req.JSONRaw, &obj); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "json must be an object"})
+			return
+		}
+		marshaled, errMarshal := json.Marshal(obj)
+		if errMarshal != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "json must be serializable"})
+			return
+		}
+		dataToWrite = marshaled
+	}
+
+	existingAuth := h.findAuthForDelete(oldName)
+	newAuth, errBuild := h.buildAuthFromFileData(targetPath, dataToWrite)
+	if errBuild != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errBuild.Error()})
+		return
+	}
+	if existingAuth != nil {
+		applyAuthRuntimeState(newAuth, existingAuth)
+	}
+	newAuth.UpdatedAt = time.Now()
+
+	if errApply := applyAuthFileChange(oldPath, targetPath, dataToWrite, renameRequested, contentProvided); errApply != nil {
+		if errors.Is(errApply, errAuthFileExists) {
+			c.JSON(http.StatusConflict, gin.H{"error": errApply.Error()})
+			return
+		}
+		if errors.Is(errApply, os.ErrNotExist) {
+			c.JSON(http.StatusNotFound, gin.H{"error": errAuthFileNotFound.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errApply.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+	if errUpsert := h.upsertAuthRecord(ctx, newAuth); errUpsert != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update auth: %v", errUpsert)})
+		return
+	}
+	if renameRequested {
+		if existingAuth != nil && existingAuth.ID != "" && existingAuth.ID != newAuth.ID {
+			h.disableAuth(ctx, existingAuth.ID)
+		} else {
+			h.disableAuth(ctx, oldPath)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"name":    filepath.Base(targetName),
+		"oldName": filepath.Base(oldName),
+	})
+}
+
+func applyAuthRuntimeState(dst *coreauth.Auth, src *coreauth.Auth) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.CreatedAt = src.CreatedAt
+	dst.Index = src.Index
+	dst.Disabled = src.Disabled
+	dst.Status = src.Status
+	dst.StatusMessage = src.StatusMessage
+	dst.Unavailable = src.Unavailable
+	dst.LastRefreshedAt = src.LastRefreshedAt
+	dst.NextRetryAfter = src.NextRetryAfter
+	dst.NextRefreshAfter = src.NextRefreshAfter
+	dst.Prefix = src.Prefix
+	dst.ProxyURL = src.ProxyURL
+	dst.Runtime = src.Runtime
+}
+
+func applyAuthFileChange(oldPath, targetPath string, data []byte, renameRequested, contentProvided bool) error {
+	if renameRequested {
+		if oldPath == targetPath {
+			return nil
+		}
+		if _, errStat := os.Stat(targetPath); errStat == nil {
+			return errAuthFileExists
+		} else if !os.IsNotExist(errStat) {
+			return fmt.Errorf("failed to check target file: %w", errStat)
+		}
+
+		if !contentProvided {
+			if errRename := os.Rename(oldPath, targetPath); errRename != nil {
+				if os.IsNotExist(errRename) {
+					return os.ErrNotExist
+				}
+				return fmt.Errorf("failed to rename file: %w", errRename)
+			}
+			return nil
+		}
+
+		parent := filepath.Dir(targetPath)
+		tmp, errTmp := os.CreateTemp(parent, ".auth-patch-*")
+		if errTmp != nil {
+			return fmt.Errorf("failed to create temp file: %w", errTmp)
+		}
+		tmpPath := tmp.Name()
+		closed := false
+		defer func() {
+			if !closed {
+				_ = tmp.Close()
+			}
+			_ = os.Remove(tmpPath)
+		}()
+
+		if _, errWrite := tmp.Write(data); errWrite != nil {
+			return fmt.Errorf("failed to write temp file: %w", errWrite)
+		}
+		if errChmod := os.Chmod(tmpPath, 0o600); errChmod != nil {
+			return fmt.Errorf("failed to set temp file permission: %w", errChmod)
+		}
+		if errClose := tmp.Close(); errClose != nil {
+			return fmt.Errorf("failed to close temp file: %w", errClose)
+		}
+		closed = true
+
+		backupPath := oldPath + ".rename-bak"
+		if errRename := os.Rename(oldPath, backupPath); errRename != nil {
+			if os.IsNotExist(errRename) {
+				return os.ErrNotExist
+			}
+			return fmt.Errorf("failed to stage old file: %w", errRename)
+		}
+		if errRename := os.Rename(tmpPath, targetPath); errRename != nil {
+			_ = os.Rename(backupPath, oldPath)
+			return fmt.Errorf("failed to promote temp file: %w", errRename)
+		}
+		if errRemove := os.Remove(backupPath); errRemove != nil && !os.IsNotExist(errRemove) {
+			return fmt.Errorf("failed to remove backup file: %w", errRemove)
+		}
+		return nil
+	}
+
+	if errWrite := os.WriteFile(targetPath, data, 0o600); errWrite != nil {
+		return fmt.Errorf("failed to write file: %w", errWrite)
 	}
 	return nil
 }

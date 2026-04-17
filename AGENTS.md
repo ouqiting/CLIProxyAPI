@@ -13,7 +13,14 @@ go run ./cmd/server # Run dev server
 go test ./... # Run all tests
 go test -v -run TestName ./path/to/pkg # Run single test
 go build -o test-output ./cmd/server && rm test-output # Verify compile (REQUIRED after changes)
+$env:CGO_ENABLED="0"; $env:GOOS="linux"; $env:GOARCH="amd64"; go build -o cli-proxy-api ./cmd/server/main.go # REQUIRED by ai_rules(readmefirst)
 ```
+
+## Post-build reminder (do not execute automatically)
+After the task is completed and compilation succeeds, remind the user to run:
+1. `pkill -9 cli-proxy-api` — stop old service
+2. `chmod +x cli-proxy-api` — grant execute permission
+3. `systemctl restart cliproxyapi.service && journalctl -u cliproxyapi.service -f` — restart and tail logs
 - Common flags: `--config <path>`, `--tui`, `--standalone`, `--local-model`, `--no-browser`, `--oauth-callback-port <port>`
 
 ## Config

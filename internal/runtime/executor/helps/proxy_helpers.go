@@ -2,6 +2,7 @@ package helps
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -21,15 +22,13 @@ import (
 //   - ctx: The context containing optional RoundTripper
 //   - cfg: The application configuration
 //   - auth: The authentication information
-//   - timeout: The client timeout (0 means no timeout)
+//   - timeout: Upstream connect/first-byte timeout (0 means no timeout)
 //
 // Returns:
 //   - *http.Client: An HTTP client with configured proxy or transport
 func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
 	httpClient := &http.Client{}
-	if timeout > 0 {
-		httpClient.Timeout = timeout
-	}
+	resolvedTimeout := resolveUpstreamTimeout(cfg, timeout)
 
 	// Priority 1: Use auth.ProxyURL if configured
 	var proxyURL string
@@ -44,7 +43,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// If we have a proxy URL configured, set up the transport
 	if proxyURL != "" {
-		transport := buildProxyTransport(proxyURL)
+		transport := transportWithUpstreamTimeouts(buildProxyTransport(proxyURL), resolvedTimeout)
 		if transport != nil {
 			httpClient.Transport = transport
 			return httpClient
@@ -55,10 +54,72 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 
 	// Priority 3: Use RoundTripper from context (typically from RoundTripperFor)
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
-		httpClient.Transport = rt
+		httpClient.Transport = roundTripperWithUpstreamTimeout(rt, resolvedTimeout)
+		return httpClient
+	}
+
+	if resolvedTimeout > 0 {
+		httpClient.Transport = transportWithUpstreamTimeouts(nil, resolvedTimeout)
 	}
 
 	return httpClient
+}
+
+func resolveUpstreamTimeout(cfg *config.Config, timeout time.Duration) time.Duration {
+	if timeout > 0 {
+		return timeout
+	}
+	if cfg == nil || cfg.UpstreamTimeout <= 0 {
+		return 0
+	}
+	return time.Duration(cfg.UpstreamTimeout) * time.Second
+}
+
+func roundTripperWithUpstreamTimeout(rt http.RoundTripper, timeout time.Duration) http.RoundTripper {
+	if rt == nil || timeout <= 0 {
+		return rt
+	}
+	transport, ok := rt.(*http.Transport)
+	if !ok {
+		return rt
+	}
+	return transportWithUpstreamTimeouts(transport, timeout)
+}
+
+func transportWithUpstreamTimeouts(transport *http.Transport, timeout time.Duration) *http.Transport {
+	if timeout <= 0 {
+		return transport
+	}
+
+	var clone *http.Transport
+	if transport != nil {
+		clone = transport.Clone()
+	} else if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok && defaultTransport != nil {
+		clone = defaultTransport.Clone()
+	} else {
+		clone = &http.Transport{}
+	}
+
+	originalDialContext := clone.DialContext
+	if originalDialContext != nil {
+		clone.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			return originalDialContext(timeoutCtx, network, addr)
+		}
+	} else {
+		clone.DialContext = (&net.Dialer{
+			Timeout:   timeout,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
+	}
+
+	clone.TLSHandshakeTimeout = timeout
+	clone.ResponseHeaderTimeout = timeout
+	return clone
 }
 
 // buildProxyTransport creates an HTTP transport configured for the given proxy URL.

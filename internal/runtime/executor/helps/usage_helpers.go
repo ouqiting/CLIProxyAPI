@@ -3,12 +3,16 @@ package helps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 	"github.com/tidwall/gjson"
@@ -43,11 +47,15 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
-	r.publishWithOutcome(ctx, detail, false)
+	r.publishWithOutcome(ctx, detail, false, nil)
 }
 
-func (r *UsageReporter) PublishFailure(ctx context.Context) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true)
+func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
+	var execErr error
+	if len(errs) > 0 {
+		execErr = errs[0]
+	}
+	r.publishWithOutcome(ctx, usage.Detail{}, true, execErr)
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -55,11 +63,11 @@ func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
 		return
 	}
 	if *errPtr != nil {
-		r.PublishFailure(ctx)
+		r.PublishFailure(ctx, *errPtr)
 	}
 }
 
-func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool) {
+func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Detail, failed bool, execErr error) {
 	if r == nil {
 		return
 	}
@@ -70,7 +78,7 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 		}
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(detail, failed))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, detail, failed, execErr))
 	})
 }
 
@@ -83,13 +91,17 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 		return
 	}
 	r.once.Do(func() {
-		usage.PublishRecord(ctx, r.buildRecord(usage.Detail{}, false))
+		usage.PublishRecord(ctx, r.buildRecord(ctx, usage.Detail{}, false, nil))
 	})
 }
 
-func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Record {
+func (r *UsageReporter) buildRecord(ctx context.Context, detail usage.Detail, failed bool, execErr error) usage.Record {
 	if r == nil {
-		return usage.Record{Detail: detail, Failed: failed}
+		return usage.Record{
+			Detail:  detail,
+			Failed:  failed,
+			Request: buildRequestMetadata(ctx, failed, execErr),
+		}
 	}
 	return usage.Record{
 		Provider:    r.provider,
@@ -102,7 +114,37 @@ func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool) usage.Reco
 		Latency:     r.latency(),
 		Failed:      failed,
 		Detail:      detail,
+		Request:     buildRequestMetadata(ctx, failed, execErr),
 	}
+}
+
+func buildRequestMetadata(ctx context.Context, failed bool, execErr error) usage.RequestMetadata {
+	meta := internalusage.SnapshotRequestMetadata(ctx, failed, execErr)
+	if meta.RequestID == "" {
+		meta.RequestID = logging.GetRequestID(ctx)
+	}
+	if meta.StatusCode == 0 {
+		if failed {
+			meta.StatusCode = statusFromUsageError(execErr)
+			if meta.StatusCode == 0 {
+				meta.StatusCode = http.StatusInternalServerError
+			}
+		} else {
+			meta.StatusCode = http.StatusOK
+		}
+	}
+	return meta
+}
+
+func statusFromUsageError(err error) int {
+	if err == nil {
+		return 0
+	}
+	var statusErr interface{ StatusCode() int }
+	if errors.As(err, &statusErr) && statusErr != nil {
+		return statusErr.StatusCode()
+	}
+	return 0
 }
 
 func (r *UsageReporter) latency() time.Duration {

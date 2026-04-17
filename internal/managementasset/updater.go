@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -180,105 +179,8 @@ func FilePath(configFilePath string) string {
 // EnsureLatestManagementHTML checks the latest management.html asset and updates the local copy when needed.
 // It coalesces concurrent sync attempts and returns whether the asset exists after the sync attempt.
 func EnsureLatestManagementHTML(ctx context.Context, staticDir string, proxyURL string, panelRepository string) bool {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	staticDir = strings.TrimSpace(staticDir)
-	if staticDir == "" {
-		log.Debug("management asset sync skipped: empty static directory")
-		return false
-	}
-	localPath := filepath.Join(staticDir, managementAssetName)
-
-	_, _, _ = sfGroup.Do(localPath, func() (interface{}, error) {
-		lastUpdateCheckMu.Lock()
-		now := time.Now()
-		timeSinceLastAttempt := now.Sub(lastUpdateCheckTime)
-		if !lastUpdateCheckTime.IsZero() && timeSinceLastAttempt < managementSyncMinInterval {
-			lastUpdateCheckMu.Unlock()
-			log.Debugf(
-				"management asset sync skipped by throttle: last attempt %v ago (interval %v)",
-				timeSinceLastAttempt.Round(time.Second),
-				managementSyncMinInterval,
-			)
-			return nil, nil
-		}
-		lastUpdateCheckTime = now
-		lastUpdateCheckMu.Unlock()
-
-		localFileMissing := false
-		if _, errStat := os.Stat(localPath); errStat != nil {
-			if errors.Is(errStat, os.ErrNotExist) {
-				localFileMissing = true
-			} else {
-				log.WithError(errStat).Debug("failed to stat local management asset")
-			}
-		}
-
-		if errMkdirAll := os.MkdirAll(staticDir, 0o755); errMkdirAll != nil {
-			log.WithError(errMkdirAll).Warn("failed to prepare static directory for management asset")
-			return nil, nil
-		}
-
-		releaseURL := resolveReleaseURL(panelRepository)
-		client := newHTTPClient(proxyURL)
-
-		localHash, err := fileSHA256(localPath)
-		if err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				log.WithError(err).Debug("failed to read local management asset hash")
-			}
-			localHash = ""
-		}
-
-		asset, remoteHash, err := fetchLatestAsset(ctx, client, releaseURL)
-		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to fetch latest management release information, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
-				return nil, nil
-			}
-			log.WithError(err).Warn("failed to fetch latest management release information")
-			return nil, nil
-		}
-
-		if remoteHash != "" && localHash != "" && strings.EqualFold(remoteHash, localHash) {
-			log.Debug("management asset is already up to date")
-			return nil, nil
-		}
-
-		data, downloadedHash, err := downloadAsset(ctx, client, asset.BrowserDownloadURL)
-		if err != nil {
-			if localFileMissing {
-				log.WithError(err).Warn("failed to download management asset, trying fallback page")
-				if ensureFallbackManagementHTML(ctx, client, localPath) {
-					return nil, nil
-				}
-				return nil, nil
-			}
-			log.WithError(err).Warn("failed to download management asset")
-			return nil, nil
-		}
-
-		if remoteHash != "" && !strings.EqualFold(remoteHash, downloadedHash) {
-			log.Errorf("management asset digest mismatch: expected %s got %s — aborting update for safety", remoteHash, downloadedHash)
-			return nil, nil
-		}
-
-		if err = atomicWriteFile(localPath, data); err != nil {
-			log.WithError(err).Warn("failed to update management asset on disk")
-			return nil, nil
-		}
-
-		log.Infof("management asset updated successfully (hash=%s)", downloadedHash)
-		return nil, nil
-	})
-
-	_, err := os.Stat(localPath)
-	return err == nil
+	result := SyncLatestManagementHTML(ctx, staticDir, proxyURL, panelRepository, UpdateOptions{})
+	return result.Exists
 }
 
 func ensureFallbackManagementHTML(ctx context.Context, client *http.Client, localPath string) bool {

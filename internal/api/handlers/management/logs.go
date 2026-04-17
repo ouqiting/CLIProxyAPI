@@ -294,6 +294,16 @@ func (h *Handler) GetRequestLogByID(c *gin.Context) {
 		return
 	}
 
+	if wantsStructuredRequestLog(c.GetHeader("Accept"), c.Query("format")) {
+		payload, errBuild := h.buildRequestLogDetailResponse(requestID, fullPath)
+		if errBuild != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to parse log file: %v", errBuild)})
+			return
+		}
+		c.JSON(http.StatusOK, payload)
+		return
+	}
+
 	c.FileAttachment(fullPath, matchedFile)
 }
 

@@ -45,6 +45,10 @@ type Config struct {
 	// Debug enables or disables debug-level logging and other debug features.
 	Debug bool `yaml:"debug" json:"debug"`
 
+	// UpstreamTimeout defines the maximum upstream connect/first-byte timeout in seconds.
+	// Set to 0 to disable the timeout.
+	UpstreamTimeout int `yaml:"upstream-timeout" json:"upstream-timeout"`
+
 	// Pprof config controls the optional pprof HTTP debug server.
 	Pprof PprofConfig `yaml:"pprof" json:"pprof"`
 
@@ -72,7 +76,9 @@ type Config struct {
 	// When <= 0, the default worker count is used.
 	AuthAutoRefreshWorkers int `yaml:"auth-auto-refresh-workers" json:"auth-auto-refresh-workers"`
 
-	// RequestRetry defines the retry times when the request failed.
+	// RequestRetry defines the retry count.
+	// In fill-first mode, it applies per credential within one request.
+	// In round-robin mode, it keeps the legacy whole-request retry behavior.
 	RequestRetry int `yaml:"request-retry" json:"request-retry"`
 	// MaxRetryCredentials defines the maximum number of credentials to try for a failed request.
 	// Set to 0 or a negative value to keep trying all available credentials (legacy behavior).
@@ -525,6 +531,9 @@ type OpenAICompatibilityAPIKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
+
+	// Disabled is a runtime-only management state and is never persisted to config.yaml.
+	Disabled bool `yaml:"-" json:"disabled"`
 }
 
 // OpenAICompatibilityModel represents a model configuration for OpenAI compatibility,

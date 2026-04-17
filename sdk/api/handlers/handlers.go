@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -495,10 +496,8 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
+		if code := statusFromError(err); code > 0 {
+			status = code
 		}
 		var addon http.Header
 		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
@@ -542,10 +541,8 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
+		if code := statusFromError(err); code > 0 {
+			status = code
 		}
 		var addon http.Header
 		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
@@ -594,10 +591,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
+		if code := statusFromError(err); code > 0 {
+			status = code
 		}
 		var addon http.Header
 		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
@@ -706,10 +701,8 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 					}
 
 					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
-						}
+					if code := statusFromError(streamErr); code > 0 {
+						status = code
 					}
 					var addon http.Header
 					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
@@ -771,10 +764,21 @@ func statusFromError(err error) int {
 	if err == nil {
 		return 0
 	}
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
+	type statusCoder interface {
+		StatusCode() int
+	}
+	var sc statusCoder
+	if errors.As(err, &sc) && sc != nil {
+		if code := sc.StatusCode(); code > 0 {
 			return code
 		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return http.StatusRequestTimeout
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr != nil && netErr.Timeout() {
+		return http.StatusRequestTimeout
 	}
 	return 0
 }

@@ -414,7 +414,12 @@ func (h *Handler) DeleteClaudeKey(c *gin.Context) {
 
 // openai-compatibility: []OpenAICompatibility
 func (h *Handler) GetOpenAICompat(c *gin.Context) {
-	c.JSON(200, gin.H{"openai-compatibility": normalizedOpenAICompatibilityEntries(h.cfg.OpenAICompatibility)})
+	entries, err := h.openAICompatEntriesWithDisabled()
+	if err != nil {
+		c.JSON(500, gin.H{"error": fmt.Sprintf("failed to load disabled openai api key registry: %v", err)})
+		return
+	}
+	c.JSON(200, gin.H{"openai-compatibility": entries})
 }
 func (h *Handler) PutOpenAICompat(c *gin.Context) {
 	data, err := c.GetRawData()

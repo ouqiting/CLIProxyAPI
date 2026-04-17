@@ -1,6 +1,8 @@
 package helps
 
 import (
+	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -19,14 +21,18 @@ import (
 // utlsRoundTripper implements http.RoundTripper using utls with Chrome fingerprint
 // to bypass Cloudflare's TLS fingerprinting on Anthropic domains.
 type utlsRoundTripper struct {
-	mu          sync.Mutex
-	connections map[string]*http2.ClientConn
-	pending     map[string]*sync.Cond
-	dialer      proxy.Dialer
+	mu             sync.Mutex
+	connections    map[string]*http2.ClientConn
+	pending        map[string]*sync.Cond
+	dialer         proxy.Dialer
+	connectTimeout time.Duration
 }
 
-func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
+func newUtlsRoundTripper(proxyURL string, timeout time.Duration) *utlsRoundTripper {
 	var dialer proxy.Dialer = proxy.Direct
+	if timeout > 0 && proxyURL == "" {
+		dialer = &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	}
 	if proxyURL != "" {
 		proxyDialer, mode, errBuild := proxyutil.BuildDialer(proxyURL)
 		if errBuild != nil {
@@ -36,9 +42,10 @@ func newUtlsRoundTripper(proxyURL string) *utlsRoundTripper {
 		}
 	}
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
+		connections:    make(map[string]*http2.ClientConn),
+		pending:        make(map[string]*sync.Cond),
+		dialer:         dialer,
+		connectTimeout: timeout,
 	}
 }
 
@@ -79,9 +86,18 @@ func (t *utlsRoundTripper) getOrCreateConnection(host, addr string) (*http2.Clie
 }
 
 func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientConn, error) {
-	conn, err := t.dialer.Dial("tcp", addr)
+	conn, err := dialProxyWithTimeout(t.dialer, "tcp", addr, t.connectTimeout)
 	if err != nil {
 		return nil, err
+	}
+	if t.connectTimeout > 0 {
+		if errSet := conn.SetDeadline(time.Now().Add(t.connectTimeout)); errSet != nil {
+			_ = conn.Close()
+			return nil, errSet
+		}
+		defer func() {
+			_ = conn.SetDeadline(time.Time{})
+		}()
 	}
 
 	tlsConfig := &tls.Config{ServerName: host}
@@ -128,6 +144,50 @@ func (t *utlsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return resp, nil
 }
 
+func dialProxyWithTimeout(dialer proxy.Dialer, network, addr string, timeout time.Duration) (net.Conn, error) {
+	if dialer == nil {
+		return nil, fmt.Errorf("nil proxy dialer")
+	}
+	if timeout <= 0 {
+		return dialer.Dial(network, addr)
+	}
+
+	type contextDialer interface {
+		DialContext(context.Context, string, string) (net.Conn, error)
+	}
+	if cd, ok := dialer.(contextDialer); ok && cd != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		return cd.DialContext(ctx, network, addr)
+	}
+
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	resultCh := make(chan dialResult, 1)
+	go func() {
+		conn, err := dialer.Dial(network, addr)
+		resultCh <- dialResult{conn: conn, err: err}
+	}()
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	select {
+	case result := <-resultCh:
+		return result.conn, result.err
+	case <-timer.C:
+		go func() {
+			result := <-resultCh
+			if result.conn != nil {
+				_ = result.conn.Close()
+			}
+		}()
+		return nil, fmt.Errorf("upstream dial timeout: %w", context.DeadlineExceeded)
+	}
+}
+
 // anthropicHosts contains the hosts that should use utls Chrome TLS fingerprint.
 var anthropicHosts = map[string]struct{}{
 	"api.anthropic.com": {},
@@ -153,6 +213,7 @@ func (f *fallbackRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 // Use this for Claude API requests to match real Claude Code's TLS behavior.
 // Falls back to standard transport for non-HTTPS requests.
 func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time.Duration) *http.Client {
+	resolvedTimeout := resolveUpstreamTimeout(cfg, timeout)
 	var proxyURL string
 	if auth != nil {
 		proxyURL = strings.TrimSpace(auth.ProxyURL)
@@ -161,9 +222,9 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 		proxyURL = strings.TrimSpace(cfg.ProxyURL)
 	}
 
-	utlsRT := newUtlsRoundTripper(proxyURL)
+	utlsRT := newUtlsRoundTripper(proxyURL, resolvedTimeout)
 
-	var standardTransport http.RoundTripper = &http.Transport{
+	standardTransport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -174,15 +235,13 @@ func NewUtlsHTTPClient(cfg *config.Config, auth *cliproxyauth.Auth, timeout time
 			standardTransport = transport
 		}
 	}
+	standardTransport = transportWithUpstreamTimeouts(standardTransport, resolvedTimeout)
 
 	client := &http.Client{
 		Transport: &fallbackRoundTripper{
 			utls:     utlsRT,
 			fallback: standardTransport,
 		},
-	}
-	if timeout > 0 {
-		client.Timeout = timeout
 	}
 	return client
 }

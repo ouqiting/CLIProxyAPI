@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
@@ -101,10 +102,13 @@ func RecordAPIRequest(ctx context.Context, cfg *config.Config, info UpstreamRequ
 
 // RecordAPIResponseMetadata captures upstream response status/header information for the latest attempt.
 func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status int, headers http.Header) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		internalusage.RecordUpstreamResponseMetadata(ginCtx, status, headers)
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}
@@ -127,10 +131,16 @@ func RecordAPIResponseMetadata(ctx context.Context, cfg *config.Config, status i
 
 // RecordAPIResponseError adds an error entry for the latest attempt when no HTTP response is available.
 func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) {
-	if cfg == nil || !cfg.RequestLog || err == nil {
+	if err == nil {
 		return
 	}
 	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		internalusage.RecordUpstreamError(ginCtx, err)
+	}
+	if cfg == nil || !cfg.RequestLog {
+		return
+	}
 	if ginCtx == nil {
 		return
 	}
@@ -152,6 +162,10 @@ func RecordAPIResponseError(ctx context.Context, cfg *config.Config, err error) 
 
 // AppendAPIResponseChunk appends an upstream response chunk to Gin context for request logging.
 func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byte) {
+	ginCtx := ginContextFrom(ctx)
+	if ginCtx != nil {
+		internalusage.AppendUpstreamResponseBody(ginCtx, chunk)
+	}
 	if cfg == nil || !cfg.RequestLog {
 		return
 	}
@@ -159,7 +173,6 @@ func AppendAPIResponseChunk(ctx context.Context, cfg *config.Config, chunk []byt
 	if len(data) == 0 {
 		return
 	}
-	ginCtx := ginContextFrom(ctx)
 	if ginCtx == nil {
 		return
 	}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/openaicompat"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
 	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
@@ -277,6 +278,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		return
 	}
 	auth = auth.Clone()
+	auth = s.applyOpenAICompatDisabledRegistry(auth)
 	s.ensureExecutorsForAuth(auth)
 
 	// IMPORTANT: Update coreManager FIRST, before model registration.
@@ -319,6 +321,30 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 	// have an empty supportedModelSet (because Register/Update upserts into the
 	// scheduler before registerModelsForAuth runs) and are invisible to the scheduler.
 	s.coreManager.RefreshSchedulerEntry(auth.ID)
+}
+
+func (s *Service) applyOpenAICompatDisabledRegistry(auth *coreauth.Auth) *coreauth.Auth {
+	if auth == nil || auth.Attributes == nil {
+		return auth
+	}
+	providerName := strings.TrimSpace(auth.Attributes["compat_name"])
+	providerBaseURL := strings.TrimSpace(auth.Attributes["base_url"])
+	apiKey := strings.TrimSpace(auth.Attributes["api_key"])
+	if providerName == "" || providerBaseURL == "" || apiKey == "" {
+		return auth
+	}
+	registry, err := openaicompat.LoadDisabledAPIKeyRegistry()
+	if err != nil {
+		log.Errorf("failed to load disabled openai api key registry while applying auth %s: %v", auth.ID, err)
+		return auth
+	}
+	if !openaicompat.IsDisabled(registry, providerName, providerBaseURL, apiKey) {
+		return auth
+	}
+	updated := auth.Clone()
+	updated.Disabled = true
+	updated.Status = coreauth.StatusDisabled
+	return updated
 }
 
 func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
