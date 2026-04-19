@@ -24,23 +24,28 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeyModels),
 	)
 }
 
 type provider struct {
 	name string
-	keys map[string]struct{}
+	keys map[string]keyPolicy
 }
 
-func newProvider(name string, keys []string) *provider {
+type keyPolicy struct {
+	disabledModels string
+}
+
+func newProvider(name string, keys []string, rules []sdkconfig.APIKeyModelRule) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	keySet := make(map[string]struct{}, len(keys))
+	policies := normalizeAPIKeyPolicies(rules)
+	keySet := make(map[string]keyPolicy, len(keys))
 	for _, key := range keys {
-		keySet[key] = struct{}{}
+		keySet[key] = keyPolicy{disabledModels: policies[key]}
 	}
 	return &provider{name: providerName, keys: keySet}
 }
@@ -89,13 +94,17 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		if candidate.value == "" {
 			continue
 		}
-		if _, ok := p.keys[candidate.value]; ok {
+		if policy, ok := p.keys[candidate.value]; ok {
+			metadata := map[string]string{
+				"source": candidate.source,
+			}
+			if policy.disabledModels != "" {
+				metadata["disabled_models"] = policy.disabledModels
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
-				Metadata: map[string]string{
-					"source": candidate.source,
-				},
+				Metadata:  metadata,
 			}, nil
 		}
 	}
@@ -136,6 +145,55 @@ func normalizeKeys(keys []string) []string {
 	}
 	if len(normalized) == 0 {
 		return nil
+	}
+	return normalized
+}
+
+func normalizeAPIKeyPolicies(rules []sdkconfig.APIKeyModelRule) map[string]string {
+	if len(rules) == 0 {
+		return nil
+	}
+	merged := make(map[string][]string, len(rules))
+	for _, rule := range rules {
+		apiKey := strings.TrimSpace(rule.APIKey)
+		if apiKey == "" {
+			continue
+		}
+		models := normalizeModelNames(rule.DisabledModels)
+		if len(models) == 0 {
+			continue
+		}
+		merged[apiKey] = append(merged[apiKey], models...)
+	}
+
+	policies := make(map[string]string, len(merged))
+	for apiKey, models := range merged {
+		normalized := normalizeModelNames(models)
+		if len(normalized) == 0 {
+			continue
+		}
+		policies[apiKey] = strings.Join(normalized, ",")
+	}
+	return policies
+}
+
+func normalizeModelNames(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		trimmed := strings.ToLower(strings.TrimSpace(model))
+		trimmed = strings.TrimPrefix(trimmed, "models/")
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
 	}
 	return normalized
 }

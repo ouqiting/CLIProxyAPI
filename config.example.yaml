@@ -41,6 +41,14 @@ api-keys:
   - "your-api-key-2"
   - "your-api-key-3"
 
+# Optional per-client model restrictions for top-level api-keys.
+# Omit disabled-models to allow all models for that key.
+api-key-models:
+  - api-key: "your-api-key-2"
+    disabled-models:
+      - "gpt-4o"
+      - "claude-3-7-sonnet"
+
 # Enable debug logging
 debug: false
 

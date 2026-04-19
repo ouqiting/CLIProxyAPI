@@ -118,6 +118,98 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
 }
 
+// api-key-models
+func (h *Handler) GetAPIKeyModels(c *gin.Context) {
+	c.JSON(200, gin.H{"api-key-models": h.cfg.APIKeyModels})
+}
+func (h *Handler) PutAPIKeyModels(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.APIKeyModelRule
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.APIKeyModelRule `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	h.cfg.APIKeyModels = append([]config.APIKeyModelRule(nil), arr...)
+	h.cfg.SanitizeAPIKeyModels()
+	h.persist(c)
+}
+func (h *Handler) PatchAPIKeyModels(c *gin.Context) {
+	type apiKeyModelPatch struct {
+		APIKey         *string   `json:"api-key"`
+		DisabledModels *[]string `json:"disabled-models"`
+	}
+	var body struct {
+		Index *int              `json:"index"`
+		Match *string           `json:"match"`
+		Value *apiKeyModelPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeyModels) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		if match != "" {
+			for i := range h.cfg.APIKeyModels {
+				if strings.TrimSpace(h.cfg.APIKeyModels[i].APIKey) == match {
+					targetIndex = i
+					break
+				}
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+	entry := &h.cfg.APIKeyModels[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = *body.Value.APIKey
+	}
+	if body.Value.DisabledModels != nil {
+		entry.DisabledModels = append([]string(nil), (*body.Value.DisabledModels)...)
+	}
+	h.cfg.SanitizeAPIKeyModels()
+	h.persist(c)
+}
+func (h *Handler) DeleteAPIKeyModels(c *gin.Context) {
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeyModels) {
+			h.cfg.APIKeyModels = append(h.cfg.APIKeyModels[:idx], h.cfg.APIKeyModels[idx+1:]...)
+			h.persist(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		out := make([]config.APIKeyModelRule, 0, len(h.cfg.APIKeyModels))
+		for _, entry := range h.cfg.APIKeyModels {
+			if strings.TrimSpace(entry.APIKey) != val {
+				out = append(out, entry)
+			}
+		}
+		h.cfg.APIKeyModels = out
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or api-key"})
+}
+
 // gemini-api-key: []GeminiKey
 func (h *Handler) GetGeminiKeys(c *gin.Context) {
 	c.JSON(200, gin.H{"gemini-api-key": h.cfg.GeminiKey})

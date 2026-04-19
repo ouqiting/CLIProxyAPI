@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	gin "github.com/gin-gonic/gin"
 	proxyconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
@@ -133,6 +135,73 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAPIKeyModelRestrictions_FilterModelsAndBlockCalls(t *testing.T) {
+	server := newTestServer(t)
+	server.cfg.APIKeys = []string{"sk-1234", "sk-5678"}
+	server.cfg.APIKeyModels = []proxyconfig.APIKeyModelRule{{
+		APIKey:         "sk-5678",
+		DisabledModels: []string{"gpt-4o"},
+	}}
+	server.applyAccessConfig(nil, server.cfg)
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient("test-openai-models", "openai", []*registry.ModelInfo{{ID: "gpt-4o"}, {ID: "gpt-4.1"}})
+	t.Cleanup(func() {
+		reg.UnregisterClient("test-openai-models")
+	})
+
+	t.Run("restricted key hides disabled models", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer sk-5678")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		body := rr.Body.String()
+		if strings.Contains(body, "gpt-4o") {
+			t.Fatalf("expected disabled model to be hidden, body=%s", body)
+		}
+		if !strings.Contains(body, "gpt-4.1") {
+			t.Fatalf("expected allowed model to remain visible, body=%s", body)
+		}
+	})
+
+	t.Run("unrestricted key still sees all models", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer sk-1234")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusOK, rr.Body.String())
+		}
+		body := rr.Body.String()
+		if !strings.Contains(body, "gpt-4o") {
+			t.Fatalf("expected unrestricted key to see gpt-4o, body=%s", body)
+		}
+	})
+
+	t.Run("restricted key cannot call disabled model", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewBufferString(`{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer sk-5678")
+		req.Header.Set("Content-Type", "application/json")
+
+		rr := httptest.NewRecorder()
+		server.engine.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("unexpected status code: got %d want %d; body=%s", rr.Code, http.StatusNotFound, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "not available for this api key") {
+			t.Fatalf("expected disabled model error, body=%s", rr.Body.String())
+		}
+	})
 }
 
 func TestDefaultRequestLoggerFactory_UsesResolvedLogDirectory(t *testing.T) {

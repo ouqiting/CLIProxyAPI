@@ -470,9 +470,15 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if IsModelDisabledForContext(ctx, normalizedModel) {
+		return nil, nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      interfaces.NewError("model_disabled", "model "+normalizedModel+" is disabled for this API key", nil),
+		}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
@@ -515,9 +521,15 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
+	}
+	if IsModelDisabledForContext(ctx, normalizedModel) {
+		return nil, nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      interfaces.NewError("model_disabled", "model "+normalizedModel+" is disabled for this API key", nil),
+		}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
@@ -561,10 +573,19 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // This path is the only supported execution route.
 // The returned http.Header carries upstream response headers captured before streaming begins.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
-	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
+	providers, normalizedModel, errMsg := h.getRequestDetails(ctx, modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
+		close(errChan)
+		return nil, nil, errChan
+	}
+	if IsModelDisabledForContext(ctx, normalizedModel) {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      interfaces.NewError("model_disabled", "model "+normalizedModel+" is disabled for this API key", nil),
+		}
 		close(errChan)
 		return nil, nil, errChan
 	}
@@ -782,7 +803,7 @@ func statusFromError(err error) int {
 	return 0
 }
 
-func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
+func (h *BaseAPIHandler) getRequestDetails(ctx context.Context, modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
 	resolvedModelName := modelName
 	initialSuffix := thinking.ParseSuffix(modelName)
 	if initialSuffix.ModelName == "auto" {
@@ -798,6 +819,12 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
+	if IsModelDisabledForContext(ctx, resolvedModelName) || IsModelDisabledForContext(ctx, baseModel) {
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusNotFound,
+			Error:      fmt.Errorf("model %s is not available for this api key", baseModel),
+		}
+	}
 
 	providers = util.GetProviderName(baseModel)
 	// Fallback: if baseModel has no provider but differs from resolvedModelName,

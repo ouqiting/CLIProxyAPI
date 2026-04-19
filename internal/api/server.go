@@ -528,6 +528,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
 
+		mgmt.GET("/api-key-models", s.mgmt.GetAPIKeyModels)
+		mgmt.PUT("/api-key-models", s.mgmt.PutAPIKeyModels)
+		mgmt.PATCH("/api-key-models", s.mgmt.PatchAPIKeyModels)
+		mgmt.DELETE("/api-key-models", s.mgmt.DeleteAPIKeyModels)
+
 		mgmt.GET("/gemini-api-key", s.mgmt.GetGeminiKeys)
 		mgmt.PUT("/gemini-api-key", s.mgmt.PutGeminiKeys)
 		mgmt.PATCH("/gemini-api-key", s.mgmt.PatchGeminiKey)

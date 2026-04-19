@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -680,6 +681,9 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
+	// Sanitize top-level per-client model restrictions.
+	cfg.SanitizeAPIKeyModels()
+
 	// Sanitize Vertex-compatible API keys.
 	cfg.SanitizeVertexCompatKeys()
 
@@ -733,6 +737,74 @@ func (cfg *Config) SanitizePayloadRules() {
 	}
 	cfg.Payload.DefaultRaw = sanitizePayloadRawRules(cfg.Payload.DefaultRaw, "default-raw")
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
+}
+
+// SanitizeAPIKeyModels normalizes top-level api-key-models entries.
+func (cfg *Config) SanitizeAPIKeyModels() {
+	if cfg == nil || len(cfg.APIKeyModels) == 0 {
+		return
+	}
+
+	merged := make(map[string]map[string]struct{}, len(cfg.APIKeyModels))
+	order := make([]string, 0, len(cfg.APIKeyModels))
+
+	for i := range cfg.APIKeyModels {
+		entry := cfg.APIKeyModels[i]
+		apiKey := strings.TrimSpace(entry.APIKey)
+		if apiKey == "" {
+			continue
+		}
+		models := normalizeModelNameList(entry.DisabledModels)
+		if len(models) == 0 {
+			continue
+		}
+		if _, exists := merged[apiKey]; !exists {
+			merged[apiKey] = make(map[string]struct{}, len(models))
+			order = append(order, apiKey)
+		}
+		for _, model := range models {
+			merged[apiKey][model] = struct{}{}
+		}
+	}
+
+	out := make([]APIKeyModelRule, 0, len(order))
+	for _, apiKey := range order {
+		disabledSet := merged[apiKey]
+		disabled := make([]string, 0, len(disabledSet))
+		for model := range disabledSet {
+			disabled = append(disabled, model)
+		}
+		sort.Strings(disabled)
+		if len(disabled) == 0 {
+			continue
+		}
+		out = append(out, APIKeyModelRule{
+			APIKey:         apiKey,
+			DisabledModels: disabled,
+		})
+	}
+	cfg.APIKeyModels = out
+}
+
+func normalizeModelNameList(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		trimmed := strings.ToLower(strings.TrimSpace(model))
+		trimmed = strings.TrimPrefix(trimmed, "models/")
+		if trimmed == "" {
+			continue
+		}
+		if _, exists := seen[trimmed]; exists {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	return normalized
 }
 
 func sanitizePayloadRawRules(rules []PayloadRule, section string) []PayloadRule {

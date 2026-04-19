@@ -24,6 +24,9 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
+	// APIKeyModels defines per-client model access restrictions for top-level api-keys.
+	APIKeyModels []APIKeyModelRule `yaml:"api-key-models,omitempty" json:"api-key-models,omitempty"`
+
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
 	// Default is false (disabled).
 	PassthroughHeaders bool `yaml:"passthrough-headers" json:"passthrough-headers"`
@@ -34,6 +37,15 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+}
+
+// APIKeyModelRule defines model restrictions for a specific client API key.
+type APIKeyModelRule struct {
+	// APIKey is the client API key from the top-level api-keys list.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// DisabledModels lists models hidden from /models and rejected on direct invocation.
+	DisabledModels []string `yaml:"disabled-models,omitempty" json:"disabled-models,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
