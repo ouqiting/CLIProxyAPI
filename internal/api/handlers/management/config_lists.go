@@ -118,10 +118,215 @@ func (h *Handler) DeleteAPIKeys(c *gin.Context) {
 	h.deleteFromStringList(c, &h.cfg.APIKeys, func() {})
 }
 
-// api-key-models
-func (h *Handler) GetAPIKeyModels(c *gin.Context) {
-	c.JSON(200, gin.H{"api-key-models": h.cfg.APIKeyModels})
+// api-key-settings
+func (h *Handler) GetAPIKeySettings(c *gin.Context) {
+	c.JSON(200, gin.H{"api-key-settings": h.cfg.APIKeySettings})
 }
+
+func (h *Handler) PutAPIKeySettings(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.APIKeySettings
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.APIKeySettings `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	for _, entry := range arr {
+		if strategy := strings.TrimSpace(entry.Strategy); strategy != "" {
+			if _, ok := config.NormalizeRoutingStrategy(strategy); !ok {
+				c.JSON(400, gin.H{"error": "invalid strategy"})
+				return
+			}
+		}
+	}
+	h.cfg.APIKeySettings = append([]config.APIKeySettings(nil), arr...)
+	h.cfg.SanitizeAPIKeySettings()
+	h.persist(c)
+}
+
+func (h *Handler) PatchAPIKeySettings(c *gin.Context) {
+	type apiKeySettingsPatch struct {
+		APIKey         *string   `json:"api-key"`
+		DisabledModels *[]string `json:"disabled-models"`
+		Strategy       *string   `json:"strategy"`
+		Note           *string   `json:"note"`
+	}
+	var body struct {
+		Index *int                 `json:"index"`
+		Match *string              `json:"match"`
+		Value *apiKeySettingsPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Value.Strategy != nil {
+		if strategy := strings.TrimSpace(*body.Value.Strategy); strategy != "" {
+			if _, ok := config.NormalizeRoutingStrategy(strategy); !ok {
+				c.JSON(400, gin.H{"error": "invalid strategy"})
+				return
+			}
+		}
+	}
+
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeySettings) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		if match != "" {
+			for i := range h.cfg.APIKeySettings {
+				if strings.TrimSpace(h.cfg.APIKeySettings[i].APIKey) == match {
+					targetIndex = i
+					break
+				}
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "not found"})
+		return
+	}
+
+	entry := &h.cfg.APIKeySettings[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = *body.Value.APIKey
+	}
+	if body.Value.DisabledModels != nil {
+		entry.DisabledModels = append([]string(nil), (*body.Value.DisabledModels)...)
+	}
+	if body.Value.Strategy != nil {
+		entry.Strategy = *body.Value.Strategy
+	}
+	if body.Value.Note != nil {
+		entry.Note = *body.Value.Note
+	}
+	h.cfg.SanitizeAPIKeySettings()
+	h.persist(c)
+}
+
+func (h *Handler) DeleteAPIKeySettings(c *gin.Context) {
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeySettings) {
+			h.cfg.APIKeySettings = append(h.cfg.APIKeySettings[:idx], h.cfg.APIKeySettings[idx+1:]...)
+			h.persist(c)
+			return
+		}
+	}
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		out := make([]config.APIKeySettings, 0, len(h.cfg.APIKeySettings))
+		for _, entry := range h.cfg.APIKeySettings {
+			if strings.TrimSpace(entry.APIKey) != val {
+				out = append(out, entry)
+			}
+		}
+		h.cfg.APIKeySettings = out
+		h.persist(c)
+		return
+	}
+	c.JSON(400, gin.H{"error": "missing index or api-key"})
+}
+
+type legacyAPIKeyModelRef struct {
+	Index int
+	Rule  config.APIKeyModelRule
+}
+
+func cloneAPIKeySettingsList(settings []config.APIKeySettings) []config.APIKeySettings {
+	if len(settings) == 0 {
+		return nil
+	}
+	cloned := make([]config.APIKeySettings, 0, len(settings))
+	for _, entry := range settings {
+		cloned = append(cloned, config.APIKeySettings{
+			APIKey:         entry.APIKey,
+			DisabledModels: append([]string(nil), entry.DisabledModels...),
+			Strategy:       entry.Strategy,
+			Note:           entry.Note,
+		})
+	}
+	return cloned
+}
+
+func legacyAPIKeyModelRefs(settings []config.APIKeySettings) []legacyAPIKeyModelRef {
+	refs := make([]legacyAPIKeyModelRef, 0, len(settings))
+	for i, entry := range settings {
+		if len(entry.DisabledModels) == 0 {
+			continue
+		}
+		refs = append(refs, legacyAPIKeyModelRef{
+			Index: i,
+			Rule: config.APIKeyModelRule{
+				APIKey:         entry.APIKey,
+				DisabledModels: append([]string(nil), entry.DisabledModels...),
+			},
+		})
+	}
+	return refs
+}
+
+func pruneLegacyEmptyAPIKeySettings(settings []config.APIKeySettings) []config.APIKeySettings {
+	if len(settings) == 0 {
+		return nil
+	}
+	out := make([]config.APIKeySettings, 0, len(settings))
+	for _, entry := range settings {
+		if strings.TrimSpace(entry.APIKey) == "" {
+			continue
+		}
+		if len(entry.DisabledModels) == 0 && strings.TrimSpace(entry.Strategy) == "" && strings.TrimSpace(entry.Note) == "" {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+func mergeLegacyAPIKeyModelRules(existing []config.APIKeySettings, rules []config.APIKeyModelRule) []config.APIKeySettings {
+	merged := cloneAPIKeySettingsList(existing)
+	indexByKey := make(map[string]int, len(merged))
+	for i := range merged {
+		merged[i].DisabledModels = nil
+		indexByKey[strings.TrimSpace(merged[i].APIKey)] = i
+	}
+	for _, rule := range rules {
+		apiKey := strings.TrimSpace(rule.APIKey)
+		if apiKey == "" {
+			continue
+		}
+		idx, exists := indexByKey[apiKey]
+		if !exists {
+			merged = append(merged, config.APIKeySettings{APIKey: apiKey})
+			idx = len(merged) - 1
+			indexByKey[apiKey] = idx
+		}
+		merged[idx].DisabledModels = append([]string(nil), rule.DisabledModels...)
+	}
+	return pruneLegacyEmptyAPIKeySettings(merged)
+}
+
+// api-key-models compatibility endpoints
+func (h *Handler) GetAPIKeyModels(c *gin.Context) {
+	refs := legacyAPIKeyModelRefs(h.cfg.APIKeySettings)
+	out := make([]config.APIKeyModelRule, 0, len(refs))
+	for _, ref := range refs {
+		out = append(out, ref.Rule)
+	}
+	c.JSON(200, gin.H{"api-key-models": out})
+}
+
 func (h *Handler) PutAPIKeyModels(c *gin.Context) {
 	data, err := c.GetRawData()
 	if err != nil {
@@ -139,10 +344,11 @@ func (h *Handler) PutAPIKeyModels(c *gin.Context) {
 		}
 		arr = obj.Items
 	}
-	h.cfg.APIKeyModels = append([]config.APIKeyModelRule(nil), arr...)
-	h.cfg.SanitizeAPIKeyModels()
+	h.cfg.APIKeySettings = mergeLegacyAPIKeyModelRules(h.cfg.APIKeySettings, arr)
+	h.cfg.SanitizeAPIKeySettings()
 	h.persist(c)
 }
+
 func (h *Handler) PatchAPIKeyModels(c *gin.Context) {
 	type apiKeyModelPatch struct {
 		APIKey         *string   `json:"api-key"`
@@ -157,16 +363,17 @@ func (h *Handler) PatchAPIKeyModels(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid body"})
 		return
 	}
+	refs := legacyAPIKeyModelRefs(h.cfg.APIKeySettings)
 	targetIndex := -1
-	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.APIKeyModels) {
-		targetIndex = *body.Index
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(refs) {
+		targetIndex = refs[*body.Index].Index
 	}
 	if targetIndex == -1 && body.Match != nil {
 		match := strings.TrimSpace(*body.Match)
 		if match != "" {
-			for i := range h.cfg.APIKeyModels {
-				if strings.TrimSpace(h.cfg.APIKeyModels[i].APIKey) == match {
-					targetIndex = i
+			for _, ref := range refs {
+				if strings.TrimSpace(ref.Rule.APIKey) == match {
+					targetIndex = ref.Index
 					break
 				}
 			}
@@ -176,34 +383,41 @@ func (h *Handler) PatchAPIKeyModels(c *gin.Context) {
 		c.JSON(404, gin.H{"error": "not found"})
 		return
 	}
-	entry := &h.cfg.APIKeyModels[targetIndex]
+	entry := &h.cfg.APIKeySettings[targetIndex]
 	if body.Value.APIKey != nil {
 		entry.APIKey = *body.Value.APIKey
 	}
 	if body.Value.DisabledModels != nil {
 		entry.DisabledModels = append([]string(nil), (*body.Value.DisabledModels)...)
 	}
-	h.cfg.SanitizeAPIKeyModels()
+	h.cfg.SanitizeAPIKeySettings()
+	h.cfg.APIKeySettings = pruneLegacyEmptyAPIKeySettings(h.cfg.APIKeySettings)
 	h.persist(c)
 }
+
 func (h *Handler) DeleteAPIKeyModels(c *gin.Context) {
 	if idxStr := c.Query("index"); idxStr != "" {
 		var idx int
 		_, err := fmt.Sscanf(idxStr, "%d", &idx)
-		if err == nil && idx >= 0 && idx < len(h.cfg.APIKeyModels) {
-			h.cfg.APIKeyModels = append(h.cfg.APIKeyModels[:idx], h.cfg.APIKeyModels[idx+1:]...)
-			h.persist(c)
-			return
+		if err == nil {
+			refs := legacyAPIKeyModelRefs(h.cfg.APIKeySettings)
+			if idx >= 0 && idx < len(refs) {
+				h.cfg.APIKeySettings[refs[idx].Index].DisabledModels = nil
+				h.cfg.SanitizeAPIKeySettings()
+				h.cfg.APIKeySettings = pruneLegacyEmptyAPIKeySettings(h.cfg.APIKeySettings)
+				h.persist(c)
+				return
+			}
 		}
 	}
 	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
-		out := make([]config.APIKeyModelRule, 0, len(h.cfg.APIKeyModels))
-		for _, entry := range h.cfg.APIKeyModels {
-			if strings.TrimSpace(entry.APIKey) != val {
-				out = append(out, entry)
+		for i := range h.cfg.APIKeySettings {
+			if strings.TrimSpace(h.cfg.APIKeySettings[i].APIKey) == val {
+				h.cfg.APIKeySettings[i].DisabledModels = nil
 			}
 		}
-		h.cfg.APIKeyModels = out
+		h.cfg.SanitizeAPIKeySettings()
+		h.cfg.APIKeySettings = pruneLegacyEmptyAPIKeySettings(h.cfg.APIKeySettings)
 		h.persist(c)
 		return
 	}

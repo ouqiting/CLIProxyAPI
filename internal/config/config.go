@@ -681,8 +681,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
 
-	// Sanitize top-level per-client model restrictions.
-	cfg.SanitizeAPIKeyModels()
+	// Sanitize top-level per-client API key settings and migrate legacy entries.
+	cfg.SanitizeAPIKeySettings()
 
 	// Sanitize Vertex-compatible API keys.
 	cfg.SanitizeVertexCompatKeys()
@@ -739,51 +739,100 @@ func (cfg *Config) SanitizePayloadRules() {
 	cfg.Payload.OverrideRaw = sanitizePayloadRawRules(cfg.Payload.OverrideRaw, "override-raw")
 }
 
-// SanitizeAPIKeyModels normalizes top-level api-key-models entries.
-func (cfg *Config) SanitizeAPIKeyModels() {
-	if cfg == nil || len(cfg.APIKeyModels) == 0 {
+// NormalizeRoutingStrategy canonicalizes a routing strategy string.
+func NormalizeRoutingStrategy(strategy string) (string, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(strategy))
+	switch normalized {
+	case "", "round-robin", "roundrobin", "rr":
+		return "round-robin", true
+	case "fill-first", "fillfirst", "ff":
+		return "fill-first", true
+	default:
+		return "", false
+	}
+}
+
+// SanitizeAPIKeySettings normalizes top-level api-key-settings entries
+// and migrates legacy api-key-models entries into the unified structure.
+func (cfg *Config) SanitizeAPIKeySettings() {
+	if cfg == nil {
 		return
 	}
 
-	merged := make(map[string]map[string]struct{}, len(cfg.APIKeyModels))
-	order := make([]string, 0, len(cfg.APIKeyModels))
+	merged := make(map[string]*APIKeySettings, len(cfg.APIKeySettings)+len(cfg.APIKeyModels))
+	order := make([]string, 0, len(cfg.APIKeySettings)+len(cfg.APIKeyModels))
+	ensureEntry := func(apiKey string) *APIKeySettings {
+		entry, exists := merged[apiKey]
+		if exists {
+			return entry
+		}
+		entry = &APIKeySettings{APIKey: apiKey}
+		merged[apiKey] = entry
+		order = append(order, apiKey)
+		return entry
+	}
 
 	for i := range cfg.APIKeyModels {
-		entry := cfg.APIKeyModels[i]
-		apiKey := strings.TrimSpace(entry.APIKey)
+		legacy := cfg.APIKeyModels[i]
+		apiKey := strings.TrimSpace(legacy.APIKey)
 		if apiKey == "" {
 			continue
 		}
-		models := normalizeModelNameList(entry.DisabledModels)
-		if len(models) == 0 {
-			continue
-		}
-		if _, exists := merged[apiKey]; !exists {
-			merged[apiKey] = make(map[string]struct{}, len(models))
-			order = append(order, apiKey)
-		}
-		for _, model := range models {
-			merged[apiKey][model] = struct{}{}
-		}
+		entry := ensureEntry(apiKey)
+		entry.DisabledModels = append(entry.DisabledModels, legacy.DisabledModels...)
 	}
 
-	out := make([]APIKeyModelRule, 0, len(order))
-	for _, apiKey := range order {
-		disabledSet := merged[apiKey]
-		disabled := make([]string, 0, len(disabledSet))
-		for model := range disabledSet {
-			disabled = append(disabled, model)
-		}
-		sort.Strings(disabled)
-		if len(disabled) == 0 {
+	for i := range cfg.APIKeySettings {
+		current := cfg.APIKeySettings[i]
+		apiKey := strings.TrimSpace(current.APIKey)
+		if apiKey == "" {
 			continue
 		}
-		out = append(out, APIKeyModelRule{
+		entry := ensureEntry(apiKey)
+		entry.DisabledModels = append(entry.DisabledModels, current.DisabledModels...)
+		entry.DisableLogging = entry.DisableLogging || current.DisableLogging
+		if strategy := strings.TrimSpace(current.Strategy); strategy != "" {
+			if normalizedStrategy, ok := NormalizeRoutingStrategy(strategy); ok {
+				entry.Strategy = normalizedStrategy
+			}
+		}
+		entry.Note = strings.TrimSpace(current.Note)
+	}
+
+	out := make([]APIKeySettings, 0, len(order))
+	for _, apiKey := range order {
+		entry := merged[apiKey]
+		if entry == nil {
+			continue
+		}
+		disabled := normalizeModelNameList(entry.DisabledModels)
+		sort.Strings(disabled)
+		if strategy := strings.TrimSpace(entry.Strategy); strategy != "" {
+			normalizedStrategy, ok := NormalizeRoutingStrategy(strategy)
+			if ok {
+				entry.Strategy = normalizedStrategy
+			} else {
+				entry.Strategy = ""
+			}
+		} else {
+			entry.Strategy = ""
+		}
+		entry.Note = strings.TrimSpace(entry.Note)
+		out = append(out, APIKeySettings{
 			APIKey:         apiKey,
 			DisabledModels: disabled,
+			DisableLogging: entry.DisableLogging,
+			Strategy:       entry.Strategy,
+			Note:           entry.Note,
 		})
 	}
-	cfg.APIKeyModels = out
+	cfg.APIKeySettings = out
+	cfg.APIKeyModels = nil
+}
+
+// SanitizeAPIKeyModels is kept for backward compatibility with older call sites.
+func (cfg *Config) SanitizeAPIKeyModels() {
+	cfg.SanitizeAPIKeySettings()
 }
 
 func normalizeModelNameList(models []string) []string {
@@ -1137,6 +1186,7 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 
 	// Remove deprecated sections before merging back the sanitized config.
 	removeLegacyAuthBlock(original.Content[0])
+	removeLegacyAPIKeyModels(original.Content[0])
 	removeLegacyOpenAICompatAPIKeys(original.Content[0])
 	removeLegacyAmpKeys(original.Content[0])
 	removeLegacyGenerativeLanguageKeys(original.Content[0])
@@ -1977,6 +2027,10 @@ func removeLegacyOpenAICompatAPIKeys(root *yaml.Node) {
 			removeMapKey(seq.Content[i], "api-keys")
 		}
 	}
+}
+
+func removeLegacyAPIKeyModels(root *yaml.Node) {
+	removeMapKey(root, "api-key-models")
 }
 
 func removeLegacyAmpKeys(root *yaml.Node) {

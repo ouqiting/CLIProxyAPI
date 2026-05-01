@@ -137,13 +137,15 @@ func (NoopHook) OnResult(context.Context, Result) {}
 
 // Manager orchestrates auth lifecycle, selection, execution, and persistence.
 type Manager struct {
-	store     Store
-	executors map[string]ProviderExecutor
-	selector  Selector
-	hook      Hook
-	mu        sync.RWMutex
-	auths     map[string]*Auth
-	scheduler *authScheduler
+	store              Store
+	executors          map[string]ProviderExecutor
+	selector           Selector
+	hook               Hook
+	mu                 sync.RWMutex
+	auths              map[string]*Auth
+	scheduler          *authScheduler
+	roundRobinSelector *RoundRobinSelector
+	fillFirstSelector  *FillFirstSelector
 	// providerOffsets tracks per-model provider rotation state for multi-provider routing.
 	providerOffsets map[string]int
 
@@ -176,20 +178,24 @@ type Manager struct {
 
 // NewManager constructs a manager with optional custom selector and hook.
 func NewManager(store Store, selector Selector, hook Hook) *Manager {
+	roundRobinSelector := &RoundRobinSelector{}
+	fillFirstSelector := &FillFirstSelector{}
 	if selector == nil {
-		selector = &RoundRobinSelector{}
+		selector = roundRobinSelector
 	}
 	if hook == nil {
 		hook = NoopHook{}
 	}
 	manager := &Manager{
-		store:            store,
-		executors:        make(map[string]ProviderExecutor),
-		selector:         selector,
-		hook:             hook,
-		auths:            make(map[string]*Auth),
-		providerOffsets:  make(map[string]int),
-		modelPoolOffsets: make(map[string]int),
+		store:              store,
+		executors:          make(map[string]ProviderExecutor),
+		selector:           selector,
+		hook:               hook,
+		auths:              make(map[string]*Auth),
+		roundRobinSelector: roundRobinSelector,
+		fillFirstSelector:  fillFirstSelector,
+		providerOffsets:    make(map[string]int),
+		modelPoolOffsets:   make(map[string]int),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
@@ -1179,7 +1185,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	if m.usesFillFirstRetryStrategy() {
+	if m.usesFillFirstRetryStrategyForRequest(opts) {
 		return m.executeFillFirst(ctx, normalized, req, opts)
 	}
 
@@ -1213,7 +1219,7 @@ func (m *Manager) ExecuteCount(ctx context.Context, providers []string, req clip
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	if m.usesFillFirstRetryStrategy() {
+	if m.usesFillFirstRetryStrategyForRequest(opts) {
 		return m.executeCountFillFirst(ctx, normalized, req, opts)
 	}
 
@@ -1247,7 +1253,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
-	if m.usesFillFirstRetryStrategy() {
+	if m.usesFillFirstRetryStrategyForRequest(opts) {
 		return m.executeStreamFillFirst(ctx, normalized, req, opts)
 	}
 
@@ -1916,6 +1922,45 @@ func (m *Manager) usesFillFirstRetryStrategy() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	_, ok := m.selector.(*FillFirstSelector)
+	return ok
+}
+
+func (m *Manager) effectiveSelectorForRequest(selector Selector, opts cliproxyexecutor.Options) Selector {
+	override, ok := schedulerStrategyFromMetadata(opts.Metadata)
+	if !ok {
+		return selector
+	}
+	switch selector.(type) {
+	case *FillFirstSelector:
+		if override == schedulerStrategyRoundRobin {
+			if m != nil && m.roundRobinSelector != nil {
+				return m.roundRobinSelector
+			}
+			return &RoundRobinSelector{}
+		}
+	case *RoundRobinSelector, nil:
+		if override == schedulerStrategyFillFirst {
+			if m != nil && m.fillFirstSelector != nil {
+				return m.fillFirstSelector
+			}
+			return &FillFirstSelector{}
+		}
+		if m != nil && m.roundRobinSelector != nil {
+			return m.roundRobinSelector
+		}
+		return &RoundRobinSelector{}
+	}
+	return selector
+}
+
+func (m *Manager) usesFillFirstRetryStrategyForRequest(opts cliproxyexecutor.Options) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	selector := m.selector
+	m.mu.RUnlock()
+	_, ok := m.effectiveSelectorForRequest(selector, opts).(*FillFirstSelector)
 	return ok
 }
 
@@ -3111,7 +3156,8 @@ func (m *Manager) pickNextLegacy(ctx context.Context, provider, model string, op
 		m.mu.RUnlock()
 		return nil, nil, errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, provider, selectionArgForSelector(m.selector, model), opts, available)
+	selector := m.effectiveSelectorForRequest(m.selector, opts)
+	selected, errPick := selector.Pick(ctx, provider, selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, errPick
@@ -3240,7 +3286,8 @@ func (m *Manager) pickNextMixedLegacy(ctx context.Context, providers []string, m
 		m.mu.RUnlock()
 		return nil, nil, "", errAvailable
 	}
-	selected, errPick := m.selector.Pick(ctx, "mixed", selectionArgForSelector(m.selector, model), opts, available)
+	selector := m.effectiveSelectorForRequest(m.selector, opts)
+	selected, errPick := selector.Pick(ctx, "mixed", selectionArgForSelector(selector, model), opts, available)
 	if errPick != nil {
 		m.mu.RUnlock()
 		return nil, nil, "", errPick

@@ -361,6 +361,7 @@ func (s *Server) setupRoutes() {
 				"POST /v1/chat/completions",
 				"POST /v1/completions",
 				"GET /v1/models",
+				"Center /management.html#",
 			},
 		})
 	})
@@ -527,6 +528,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)
 		mgmt.PATCH("/api-keys", s.mgmt.PatchAPIKeys)
 		mgmt.DELETE("/api-keys", s.mgmt.DeleteAPIKeys)
+
+		mgmt.GET("/api-key-settings", s.mgmt.GetAPIKeySettings)
+		mgmt.PUT("/api-key-settings", s.mgmt.PutAPIKeySettings)
+		mgmt.PATCH("/api-key-settings", s.mgmt.PatchAPIKeySettings)
+		mgmt.DELETE("/api-key-settings", s.mgmt.DeleteAPIKeySettings)
 
 		mgmt.GET("/api-key-models", s.mgmt.GetAPIKeyModels)
 		mgmt.PUT("/api-key-models", s.mgmt.PutAPIKeyModels)

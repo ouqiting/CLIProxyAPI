@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v6/sdk/config"
 )
 
@@ -24,7 +25,7 @@ func Register(cfg *sdkconfig.SDKConfig) {
 
 	sdkaccess.RegisterProvider(
 		sdkaccess.AccessProviderTypeConfigAPIKey,
-		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeyModels),
+		newProvider(sdkaccess.DefaultAccessProviderName, keys, cfg.APIKeySettings),
 	)
 }
 
@@ -35,17 +36,18 @@ type provider struct {
 
 type keyPolicy struct {
 	disabledModels string
+	strategy       string
 }
 
-func newProvider(name string, keys []string, rules []sdkconfig.APIKeyModelRule) *provider {
+func newProvider(name string, keys []string, settings []sdkconfig.APIKeySettings) *provider {
 	providerName := strings.TrimSpace(name)
 	if providerName == "" {
 		providerName = sdkaccess.DefaultAccessProviderName
 	}
-	policies := normalizeAPIKeyPolicies(rules)
+	policies := normalizeAPIKeyPolicies(settings)
 	keySet := make(map[string]keyPolicy, len(keys))
 	for _, key := range keys {
-		keySet[key] = keyPolicy{disabledModels: policies[key]}
+		keySet[key] = policies[key]
 	}
 	return &provider{name: providerName, keys: keySet}
 }
@@ -101,6 +103,9 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 			if policy.disabledModels != "" {
 				metadata["disabled_models"] = policy.disabledModels
 			}
+			if policy.strategy != "" {
+				metadata[cliproxyexecutor.RoutingStrategyMetadataKey] = policy.strategy
+			}
 			return &sdkaccess.Result{
 				Provider:  p.Identifier(),
 				Principal: candidate.value,
@@ -149,32 +154,34 @@ func normalizeKeys(keys []string) []string {
 	return normalized
 }
 
-func normalizeAPIKeyPolicies(rules []sdkconfig.APIKeyModelRule) map[string]string {
-	if len(rules) == 0 {
+func normalizeAPIKeyPolicies(settings []sdkconfig.APIKeySettings) map[string]keyPolicy {
+	if len(settings) == 0 {
 		return nil
 	}
-	merged := make(map[string][]string, len(rules))
-	for _, rule := range rules {
-		apiKey := strings.TrimSpace(rule.APIKey)
+	merged := make(map[string]keyPolicy, len(settings))
+	for _, setting := range settings {
+		apiKey := strings.TrimSpace(setting.APIKey)
 		if apiKey == "" {
 			continue
 		}
-		models := normalizeModelNames(rule.DisabledModels)
-		if len(models) == 0 {
-			continue
+		policy := merged[apiKey]
+		if models := normalizeModelNames(setting.DisabledModels); len(models) > 0 {
+			if policy.disabledModels != "" {
+				models = append(strings.Split(policy.disabledModels, ","), models...)
+			}
+			normalized := normalizeModelNames(models)
+			if len(normalized) > 0 {
+				policy.disabledModels = strings.Join(normalized, ",")
+			}
 		}
-		merged[apiKey] = append(merged[apiKey], models...)
-	}
-
-	policies := make(map[string]string, len(merged))
-	for apiKey, models := range merged {
-		normalized := normalizeModelNames(models)
-		if len(normalized) == 0 {
-			continue
+		if strategy := strings.TrimSpace(setting.Strategy); strategy != "" {
+			if normalized, ok := sdkconfig.NormalizeRoutingStrategy(strategy); ok && normalized != "" {
+				policy.strategy = normalized
+			}
 		}
-		policies[apiKey] = strings.Join(normalized, ",")
+		merged[apiKey] = policy
 	}
-	return policies
+	return merged
 }
 
 func normalizeModelNames(models []string) []string {

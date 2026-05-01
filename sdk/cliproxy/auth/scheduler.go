@@ -185,6 +185,42 @@ func selectorStrategy(selector Selector) schedulerStrategy {
 	}
 }
 
+func normalizedSchedulerStrategy(strategy string) (schedulerStrategy, bool) {
+	switch strings.ToLower(strings.TrimSpace(strategy)) {
+	case "", "round-robin", "roundrobin", "rr":
+		return schedulerStrategyRoundRobin, true
+	case "fill-first", "fillfirst", "ff":
+		return schedulerStrategyFillFirst, true
+	default:
+		return schedulerStrategyRoundRobin, false
+	}
+}
+
+func schedulerStrategyFromMetadata(metadata map[string]any) (schedulerStrategy, bool) {
+	if len(metadata) == 0 {
+		return schedulerStrategyRoundRobin, false
+	}
+	raw, ok := metadata[cliproxyexecutor.RoutingStrategyMetadataKey]
+	if !ok || raw == nil {
+		return schedulerStrategyRoundRobin, false
+	}
+	switch value := raw.(type) {
+	case string:
+		return normalizedSchedulerStrategy(value)
+	case []byte:
+		return normalizedSchedulerStrategy(string(value))
+	default:
+		return schedulerStrategyRoundRobin, false
+	}
+}
+
+func effectiveSchedulerStrategy(defaultStrategy schedulerStrategy, opts cliproxyexecutor.Options) schedulerStrategy {
+	if override, ok := schedulerStrategyFromMetadata(opts.Metadata); ok {
+		return override
+	}
+	return defaultStrategy
+}
+
 // setSelector updates the active built-in strategy and resets mixed-provider cursors.
 func (s *authScheduler) setSelector(selector Selector) {
 	if s == nil {
@@ -270,7 +306,8 @@ func (s *authScheduler) pickSingle(ctx context.Context, provider, model string, 
 		}
 		return true
 	}
-	if picked := shard.pickReadyLocked(preferWebsocket, s.strategy, predicate); picked != nil {
+	strategy := effectiveSchedulerStrategy(s.strategy, opts)
+	if picked := shard.pickReadyLocked(preferWebsocket, strategy, predicate); picked != nil {
 		return picked, nil
 	}
 	return nil, shard.unavailableErrorLocked(provider, model, predicate)
@@ -323,7 +360,8 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 			_, ok := tried[pinnedAuthID]
 			return !ok
 		}
-		if picked := shard.pickReadyLocked(false, s.strategy, predicate); picked != nil {
+		strategy := effectiveSchedulerStrategy(s.strategy, opts)
+		if picked := shard.pickReadyLocked(false, strategy, predicate); picked != nil {
 			return picked, providerKey, nil
 		}
 		return nil, "", shard.unavailableErrorLocked("mixed", model, predicate)
@@ -357,13 +395,14 @@ func (s *authScheduler) pickMixed(ctx context.Context, providers []string, model
 		return nil, "", s.mixedUnavailableErrorLocked(normalized, model, tried)
 	}
 
-	if s.strategy == schedulerStrategyFillFirst {
+	strategy := effectiveSchedulerStrategy(s.strategy, opts)
+	if strategy == schedulerStrategyFillFirst {
 		for providerIndex, providerKey := range normalized {
 			shard := candidateShards[providerIndex]
 			if shard == nil {
 				continue
 			}
-			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, s.strategy, predicate)
+			picked := shard.pickReadyAtPriorityLocked(false, bestPriority, strategy, predicate)
 			if picked != nil {
 				return picked, providerKey, nil
 			}

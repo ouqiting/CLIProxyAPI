@@ -140,7 +140,7 @@ func TestAmpProviderModelRoutes(t *testing.T) {
 func TestAPIKeyModelRestrictions_FilterModelsAndBlockCalls(t *testing.T) {
 	server := newTestServer(t)
 	server.cfg.APIKeys = []string{"sk-1234", "sk-5678"}
-	server.cfg.APIKeyModels = []proxyconfig.APIKeyModelRule{{
+	server.cfg.APIKeySettings = []proxyconfig.APIKeySettings{{
 		APIKey:         "sk-5678",
 		DisabledModels: []string{"gpt-4o"},
 	}}

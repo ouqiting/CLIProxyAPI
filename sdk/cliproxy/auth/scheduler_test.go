@@ -119,6 +119,36 @@ func TestSchedulerPick_FillFirstSticksToFirstReady(t *testing.T) {
 	}
 }
 
+func TestSchedulerPick_UsesRoutingStrategyOverrideMetadata(t *testing.T) {
+	t.Parallel()
+
+	scheduler := newSchedulerForTest(
+		&FillFirstSelector{},
+		&Auth{ID: "b", Provider: "gemini"},
+		&Auth{ID: "a", Provider: "gemini"},
+	)
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RoutingStrategyMetadataKey: "round-robin",
+		},
+	}
+	first, errPick := scheduler.pickSingle(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() first error = %v", errPick)
+	}
+	second, errPick := scheduler.pickSingle(context.Background(), "gemini", "", opts, nil)
+	if errPick != nil {
+		t.Fatalf("pickSingle() second error = %v", errPick)
+	}
+	if first == nil || second == nil {
+		t.Fatalf("pickSingle() returned nil auths: first=%v second=%v", first, second)
+	}
+	if first.ID != "a" || second.ID != "b" {
+		t.Fatalf("pickSingle() IDs = %q, %q; want %q, %q", first.ID, second.ID, "a", "b")
+	}
+}
+
 func TestSchedulerPick_PromotesExpiredCooldownBeforePick(t *testing.T) {
 	t.Parallel()
 
@@ -440,6 +470,40 @@ func TestManager_PickNextMixed_UsesSchedulerRotation(t *testing.T) {
 		}
 		if got.ID != wantIDs[index] {
 			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, wantIDs[index])
+		}
+	}
+}
+
+func TestManager_PickNextMixed_UsesRoutingStrategyOverrideMetadata(t *testing.T) {
+	t.Parallel()
+
+	manager := NewManager(nil, &RoundRobinSelector{}, nil)
+	manager.executors["gemini"] = schedulerTestExecutor{}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-b", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-b) error = %v", errRegister)
+	}
+	if _, errRegister := manager.Register(context.Background(), &Auth{ID: "auth-a", Provider: "gemini"}); errRegister != nil {
+		t.Fatalf("Register(auth-a) error = %v", errRegister)
+	}
+
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.RoutingStrategyMetadataKey: "fill-first",
+		},
+	}
+	for index := 0; index < 3; index++ {
+		got, _, provider, errPick := manager.pickNextMixed(context.Background(), []string{"gemini"}, "", opts, nil)
+		if errPick != nil {
+			t.Fatalf("pickNextMixed() #%d error = %v", index, errPick)
+		}
+		if got == nil {
+			t.Fatalf("pickNextMixed() #%d auth = nil", index)
+		}
+		if provider != "gemini" {
+			t.Fatalf("pickNextMixed() #%d provider = %q, want %q", index, provider, "gemini")
+		}
+		if got.ID != "auth-a" {
+			t.Fatalf("pickNextMixed() #%d auth.ID = %q, want %q", index, got.ID, "auth-a")
 		}
 	}
 }

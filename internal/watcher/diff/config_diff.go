@@ -94,6 +94,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	} else if !reflect.DeepEqual(trimStrings(oldCfg.APIKeys), trimStrings(newCfg.APIKeys)) {
 		changes = append(changes, "api-keys: values updated (count unchanged, redacted)")
 	}
+	if !equalAPIKeySettings(oldCfg.APIKeySettings, newCfg.APIKeySettings) {
+		changes = append(changes, fmt.Sprintf("api-key-settings: updated (%d -> %d entries)", len(oldCfg.APIKeySettings), len(newCfg.APIKeySettings)))
+	}
 	if len(oldCfg.GeminiKey) != len(newCfg.GeminiKey) {
 		changes = append(changes, fmt.Sprintf("gemini-api-key count: %d -> %d", len(oldCfg.GeminiKey), len(newCfg.GeminiKey)))
 	} else {
@@ -406,6 +409,27 @@ func equalUpstreamAPIKeys(a, b []config.AmpUpstreamAPIKeyEntry) bool {
 			return false
 		}
 		if !equalStringSet(a[i].APIKeys, b[i].APIKeys) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalAPIKeySettings(a, b []config.APIKeySettings) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.TrimSpace(a[i].APIKey) != strings.TrimSpace(b[i].APIKey) {
+			return false
+		}
+		if !equalStringSet(a[i].DisabledModels, b[i].DisabledModels) {
+			return false
+		}
+		if strings.TrimSpace(a[i].Strategy) != strings.TrimSpace(b[i].Strategy) {
+			return false
+		}
+		if strings.TrimSpace(a[i].Note) != strings.TrimSpace(b[i].Note) {
 			return false
 		}
 	}

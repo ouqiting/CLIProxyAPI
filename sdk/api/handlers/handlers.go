@@ -190,9 +190,15 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// Only include it if the client explicitly provides it.
 	key := ""
+	var accessMetadata map[string]string
 	if ctx != nil {
 		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
 			key = strings.TrimSpace(ginCtx.GetHeader("Idempotency-Key"))
+			if raw, exists := ginCtx.Get("accessMetadata"); exists {
+				if typed, okTyped := raw.(map[string]string); okTyped {
+					accessMetadata = typed
+				}
+			}
 		}
 	}
 
@@ -208,6 +214,9 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	}
 	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
 		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
+	}
+	if strategy := strings.TrimSpace(accessMetadata[coreexecutor.RoutingStrategyMetadataKey]); strategy != "" {
+		meta[coreexecutor.RoutingStrategyMetadataKey] = strategy
 	}
 	return meta
 }
@@ -477,7 +486,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if IsModelDisabledForContext(ctx, normalizedModel) {
 		return nil, nil, &interfaces.ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      interfaces.NewError("model_disabled", "model "+normalizedModel+" is disabled for this API key", nil),
+			Error:      &coreauth.Error{Code: "model_disabled", Message: "model " + normalizedModel + " is disabled for this API key", HTTPStatus: http.StatusForbidden},
 		}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
@@ -528,7 +537,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if IsModelDisabledForContext(ctx, normalizedModel) {
 		return nil, nil, &interfaces.ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      interfaces.NewError("model_disabled", "model "+normalizedModel+" is disabled for this API key", nil),
+			Error:      &coreauth.Error{Code: "model_disabled", Message: "model " + normalizedModel + " is disabled for this API key", HTTPStatus: http.StatusForbidden},
 		}
 	}
 	reqMeta := requestExecutionMetadata(ctx)
@@ -584,7 +593,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- &interfaces.ErrorMessage{
 			StatusCode: http.StatusForbidden,
-			Error:      interfaces.NewError("model_disabled", "model "+normalizedModel+" is disabled for this API key", nil),
+			Error:      &coreauth.Error{Code: "model_disabled", Message: "model " + normalizedModel + " is disabled for this API key", HTTPStatus: http.StatusForbidden},
 		}
 		close(errChan)
 		return nil, nil, errChan

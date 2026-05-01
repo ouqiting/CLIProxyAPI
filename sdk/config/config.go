@@ -7,6 +7,7 @@ package config
 import internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 
 type SDKConfig = internalconfig.SDKConfig
+type APIKeySettings = internalconfig.APIKeySettings
 type APIKeyModelRule = internalconfig.APIKeyModelRule
 
 type Config = internalconfig.Config
@@ -52,4 +53,8 @@ func SaveConfigPreserveCommentsUpdateNestedScalar(configFile string, path []stri
 
 func NormalizeCommentIndentation(data []byte) []byte {
 	return internalconfig.NormalizeCommentIndentation(data)
+}
+
+func NormalizeRoutingStrategy(strategy string) (string, bool) {
+	return internalconfig.NormalizeRoutingStrategy(strategy)
 }

@@ -24,7 +24,11 @@ type SDKConfig struct {
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 
-	// APIKeyModels defines per-client model access restrictions for top-level api-keys.
+	// APIKeySettings defines per-client settings for top-level api-keys.
+	APIKeySettings []APIKeySettings `yaml:"api-key-settings,omitempty" json:"api-key-settings,omitempty"`
+
+	// APIKeyModels defines legacy per-client model access restrictions for top-level api-keys.
+	// Deprecated: use APIKeySettings instead.
 	APIKeyModels []APIKeyModelRule `yaml:"api-key-models,omitempty" json:"api-key-models,omitempty"`
 
 	// PassthroughHeaders controls whether upstream response headers are forwarded to downstream clients.
@@ -46,6 +50,25 @@ type APIKeyModelRule struct {
 
 	// DisabledModels lists models hidden from /models and rejected on direct invocation.
 	DisabledModels []string `yaml:"disabled-models,omitempty" json:"disabled-models,omitempty"`
+}
+
+// APIKeySettings defines per-client settings for a specific top-level API key.
+type APIKeySettings struct {
+	// APIKey is the client API key from the top-level api-keys list.
+	APIKey string `yaml:"api-key" json:"api-key"`
+
+	// DisabledModels lists models hidden from /models and rejected on direct invocation.
+	DisabledModels []string `yaml:"disabled-models,omitempty" json:"disabled-models,omitempty"`
+
+	// DisableLogging hides successful request logs for this API key while keeping failed logs.
+	DisableLogging bool `yaml:"disable-logging,omitempty" json:"disable-logging,omitempty"`
+
+	// Strategy overrides the global routing strategy for requests authenticated with this API key.
+	// Supported values: "round-robin", "fill-first".
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+
+	// Note stores an optional front-end readable remark for this API key.
+	Note string `yaml:"note,omitempty" json:"note,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
